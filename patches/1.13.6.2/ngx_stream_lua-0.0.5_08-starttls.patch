@@ -1,21 +1,30 @@
-diff -ur a/ngx_stream_lua-0.0.5/src/ngx_stream_lua_common.h b/ngx_stream_lua-0.0.5/src/ngx_stream_lua_common.h
---- a/ngx_stream_lua-0.0.5/src/ngx_stream_lua_common.h	2018-11-13 15:19:32.748138984 -0200
-+++ b/ngx_stream_lua-0.0.5/src/ngx_stream_lua_common.h	2018-11-13 15:20:14.717137263 -0200
-@@ -398,6 +398,11 @@
-     ngx_stream_lua_co_ctx_t   *on_abort_co_ctx; /* coroutine context for the
-                                                  on_abort thread */
+diff -ur a/ngx_stream_lua-0.0.5/src/ngx_stream_lua_request.h b/ngx_stream_lua-0.0.5/src/ngx_stream_lua_request.h
+--- a/ngx_stream_lua-0.0.5/src/ngx_stream_lua_request.h	2018-04-22 15:42:58.000000000 -0300
++++ b/ngx_stream_lua-0.0.5/src/ngx_stream_lua_request.h	2018-11-16 19:54:23.361833464 -0200
+@@ -21,6 +21,8 @@
  
-+    ngx_stream_lua_co_ctx_t   *starttls_co_ctx; /* coroutine context for
-+                                                   ngx.req.starttls */
-+    ngx_stream_lua_handler_pt  starttls_read_handler;
-+    ngx_stream_lua_handler_pt  starttls_write_handler;
+ typedef struct ngx_stream_lua_request_s  ngx_stream_lua_request_t;
+ 
++typedef struct ngx_stream_lua_co_ctx_s   ngx_stream_lua_co_ctx_t;
 +
-     int                      ctx_ref;  /*  reference to anchor
-                                            request ctx data in lua
-                                            registry */
+ typedef void (*ngx_stream_lua_event_handler_pt)(ngx_stream_lua_request_t *r);
+ 
+ 
+@@ -32,6 +34,11 @@
+ 
+     ngx_stream_lua_event_handler_pt       read_event_handler;
+     ngx_stream_lua_event_handler_pt       write_event_handler;
++
++    /* coroutine context for ngx.req.starttls */
++    ngx_stream_lua_co_ctx_t              *starttls_co_ctx;
++    ngx_event_handler_pt                  starttls_read_handler;
++    ngx_event_handler_pt                  starttls_write_handler;
+ };
+ 
+ 
 diff -ur a/ngx_stream_lua-0.0.5/src/ngx_stream_lua_ssl.c b/ngx_stream_lua-0.0.5/src/ngx_stream_lua_ssl.c
---- a/ngx_stream_lua-0.0.5/src/ngx_stream_lua_ssl.c	2018-11-13 15:19:32.740138984 -0200
-+++ b/ngx_stream_lua-0.0.5/src/ngx_stream_lua_ssl.c	2018-11-13 15:32:10.917107893 -0200
+--- a/ngx_stream_lua-0.0.5/src/ngx_stream_lua_ssl.c	2018-11-16 19:45:37.106855045 -0200
++++ b/ngx_stream_lua-0.0.5/src/ngx_stream_lua_ssl.c	2018-11-16 19:47:59.137849220 -0200
 @@ -18,6 +18,11 @@
  #include "ddebug.h"
  
@@ -28,7 +37,7 @@ diff -ur a/ngx_stream_lua-0.0.5/src/ngx_stream_lua_ssl.c b/ngx_stream_lua-0.0.5/
  #if (NGX_STREAM_SSL)
  
  
-@@ -44,4 +49,157 @@
+@@ -44,4 +49,161 @@
  }
  
  
@@ -39,6 +48,7 @@ diff -ur a/ngx_stream_lua-0.0.5/src/ngx_stream_lua_ssl.c b/ngx_stream_lua-0.0.5/
 +    ngx_stream_lua_ctx_t      *ctx;
 +    ngx_stream_lua_request_t  *r;
 +    lua_State                 *L;
++    lua_State                 *vm;
 +    ngx_int_t                  rc;
 +
 +    s = c->data;
@@ -52,16 +62,19 @@ diff -ur a/ngx_stream_lua-0.0.5/src/ngx_stream_lua_ssl.c b/ngx_stream_lua-0.0.5/
 +    }
 +
 +    /* restore states of coroutine and connection */
-+    ctx->cur_co_ctx = ctx->starttls_co_ctx;
-+    c->read->handler = ctx->starttls_read_handler;
-+    c->write->handler = ctx->starttls_write_handler;
++    ctx->cur_co_ctx = r->starttls_co_ctx;
++    c->read->handler = r->starttls_read_handler;
++    c->write->handler = r->starttls_write_handler;
 +
 +    /* push return value */
 +    L = ctx->cur_co_ctx->co;
 +    lua_pushboolean(L, c->ssl->handshaked);
 +
++    /* get main handle of the Lua VM */
++    vm = ngx_stream_lua_get_lua_vm(r, ctx);
++
 +    /* continue execution of caller Lua code */
-+    rc = ngx_stream_lua_run_thread(L, r, ctx, 1);
++    rc = ngx_stream_lua_run_thread(vm, r, ctx, 1);
 +
 +    if (ctx->entered_content_phase) {
 +        ngx_stream_lua_finalize_request(r, NGX_DONE);
@@ -148,9 +161,9 @@ diff -ur a/ngx_stream_lua-0.0.5/src/ngx_stream_lua_ssl.c b/ngx_stream_lua-0.0.5/
 +    }
 +
 +    /* store states of coroutine and connection */
-+    ctx->starttls_co_ctx = coctx;
-+    ctx->starttls_read_handler = c->read->handler;
-+    ctx->starttls_write_handler = c->write->handler;
++    r->starttls_co_ctx = coctx;
++    r->starttls_read_handler = c->read->handler;
++    r->starttls_write_handler = c->write->handler;
 +    
 +    if (ngx_ssl_create_connection(ssl, c, 0) != NGX_OK) {
 +        return NGX_ERROR;
