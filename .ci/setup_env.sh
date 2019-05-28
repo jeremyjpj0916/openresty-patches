@@ -33,7 +33,7 @@ if [ ! "$(ls -A $CPAN_DOWNLOAD)" ]; then
 fi
 
 if [ ! "$(ls -A $KONG_DOWNLOAD)" ]; then
-  git clone -q https://github.com/Kong/kong.git $KONG_DOWNLOAD
+  git clone -q -b chore/bump-openresty https://github.com/Kong/kong.git $KONG_DOWNLOAD
 fi
 
 #--------
