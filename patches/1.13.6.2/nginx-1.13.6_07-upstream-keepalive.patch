@@ -1,0 +1,291 @@
+From 839aa7b7cc4ea50c0b2cb64ece16ab401e49dcca Mon Sep 17 00:00:00 2001
+From: Thibault Charbonnier <thibaultcha@me.com>
+Date: Tue, 2 Oct 2018 14:53:21 -0700
+Subject: [PATCH] Upstream keepalive: add pool_ssl_name option
+
+This patch adds an option to the 'keepalive' directive of the upstream
+keepalive module. This option is only valid when Nginx is compiled with
+SSL support. When enabled as such:
+
+    keepalive pool_ssl_name=on;
+
+The upstream keepalive module stores the SNI (Server Name Indication)
+for each upstream connection made over SSL, and ensures that connection
+reuse can only take effect when using the original SNI the connection
+was originally opened with.
+
+In practice, this enables use cases such as:
+
+    proxy_ssl_server_name on;
+
+    upstream my_upstream {
+        server ...;
+
+        keepalive 60 pool_ssl_name=on;
+    }
+
+    server {
+        listen 8000;
+
+        location / {
+            proxy_ssl_name     $http_host;
+            proxy_http_version 1.1;
+            proxy_set_header   Host $http_host;
+            proxy_set_header   Connection '';
+            proxy_pass         https://my_upstream;
+        }
+    }
+
+Where the use of 'pool_ssl_name=on' ensures that two proxied requests with
+a different Host header are only made over connections matching the
+requested SNI.
+
+The 'connections' parameter of the 'keepalive' directive still
+determines the maximum number of upstream idle connections when this
+option is enabled, regardless of their SNI.
+---
+ .../ngx_http_upstream_keepalive_module.c      | 61 +++++++++++++++++++
+ src/http/ngx_http_upstream.c                  | 46 ++++++++++----
+ 2 files changed, 96 insertions(+), 11 deletions(-)
+
+diff --git a/src/http/modules/ngx_http_upstream_keepalive_module.c b/src/http/modules/ngx_http_upstream_keepalive_module.c
+index 0048e6bc..0e0f66ae 100644
+--- a/nginx-1.13.6/src/http/modules/ngx_http_upstream_keepalive_module.c
++++ b/nginx-1.13.6/src/http/modules/ngx_http_upstream_keepalive_module.c
+@@ -19,6 +19,10 @@ typedef struct {
+     ngx_http_upstream_init_pt          original_init_upstream;
+     ngx_http_upstream_init_peer_pt     original_init_peer;
+ 
++#if (NGX_HTTP_SSL)
++    ngx_flag_t                         pool_ssl_name;
++#endif
++
+ } ngx_http_upstream_keepalive_srv_conf_t;
+ 
+ 
+@@ -31,6 +35,10 @@ typedef struct {
+     socklen_t                          socklen;
+     ngx_sockaddr_t                     sockaddr;
+ 
++#if (NGX_HTTP_SSL)
++    uint32_t                           ssl_name_hash;
++#endif
++
+ } ngx_http_upstream_keepalive_cache_t;
+ 
+ 
+@@ -47,6 +55,7 @@ typedef struct {
+ #if (NGX_HTTP_SSL)
+     ngx_event_set_peer_session_pt      original_set_session;
+     ngx_event_save_peer_session_pt     original_save_session;
++    uint32_t                           ssl_name_hash;
+ #endif
+ 
+ } ngx_http_upstream_keepalive_peer_data_t;
+@@ -78,7 +87,11 @@ static char *ngx_http_upstream_keepalive(ngx_conf_t *cf, ngx_command_t *cmd,
+ static ngx_command_t  ngx_http_upstream_keepalive_commands[] = {
+ 
+     { ngx_string("keepalive"),
++#if (NGX_HTTP_SSL)
++      NGX_HTTP_UPS_CONF|NGX_CONF_TAKE1|NGX_CONF_TAKE2,
++#else
+       NGX_HTTP_UPS_CONF|NGX_CONF_TAKE1,
++#endif
+       ngx_http_upstream_keepalive,
+       NGX_HTTP_SRV_CONF_OFFSET,
+       0,
+@@ -194,6 +207,11 @@ ngx_http_upstream_init_keepalive_peer(ngx_http_request_t *r,
+     r->upstream->peer.free = ngx_http_upstream_free_keepalive_peer;
+ 
+ #if (NGX_HTTP_SSL)
++    if (r->upstream->ssl && kcf->pool_ssl_name) {
++        kp->ssl_name_hash = ngx_crc32_short(r->upstream->ssl_name.data,
++                                            r->upstream->ssl_name.len);
++    }
++
+     kp->original_set_session = r->upstream->peer.set_session;
+     kp->original_save_session = r->upstream->peer.save_session;
+     r->upstream->peer.set_session = ngx_http_upstream_keepalive_set_session;
+@@ -240,10 +258,22 @@ ngx_http_upstream_get_keepalive_peer(ngx_peer_connection_t *pc, void *data)
+                          item->socklen, pc->socklen)
+             == 0)
+         {
++
++#if (NGX_HTTP_SSL)
++            if (item->ssl_name_hash == 0
++                || item->ssl_name_hash == kp->ssl_name_hash)
++            {
++#endif
++
+             ngx_queue_remove(q);
+             ngx_queue_insert_head(&kp->conf->free, q);
+ 
+             goto found;
++
++#if (NGX_HTTP_SSL)
++            }
++#endif
++
+         }
+     }
+ 
+@@ -359,6 +389,10 @@ ngx_http_upstream_free_keepalive_peer(ngx_peer_connection_t *pc, void *data,
+     item->socklen = pc->socklen;
+     ngx_memcpy(&item->sockaddr, pc->sockaddr, pc->socklen);
+ 
++#if (NGX_HTTP_SSL)
++    item->ssl_name_hash = kp->ssl_name_hash;
++#endif
++
+     if (c->read->ready) {
+         ngx_http_upstream_keepalive_close_handler(c->read);
+     }
+@@ -485,6 +519,10 @@ ngx_http_upstream_keepalive_create_conf(ngx_conf_t *cf)
+      *     conf->max_cached = 0;
+      */
+ 
++#if (NGX_HTTP_SSL)
++    conf->pool_ssl_name = NGX_CONF_UNSET;
++#endif
++
+     return conf;
+ }
+ 
+@@ -525,5 +563,28 @@ ngx_http_upstream_keepalive(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ 
+     uscf->peer.init_upstream = ngx_http_upstream_init_keepalive;
+ 
++#if (NGX_HTTP_SSL)
++    kcf->pool_ssl_name = 0;
++
++    if (cf->args->nelts == 3) {
++        if (ngx_strncmp(value[2].data, "pool_ssl_name=", 14) == 0) {
++            if (ngx_strcmp(&value[2].data[14], "on") == 0) {
++                kcf->pool_ssl_name = 1;
++                goto done;
++
++            } else if (ngx_strcmp(&value[2].data[14], "off") == 0) {
++                goto done;
++            }
++        }
++
++        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
++                           "invalid value \"%V\" in \"%V\" directive",
++                           &value[2], &cmd->name);
++        return NGX_CONF_ERROR;
++    }
++#endif
++
++done:
++
+     return NGX_CONF_OK;
+ }
+diff --git a/src/http/ngx_http_upstream.c b/src/http/ngx_http_upstream.c
+index 2ea521b0..ba9d2450 100644
+--- a/nginx-1.13.6/src/http/ngx_http_upstream.c
++++ b/nginx-1.13.6/src/http/ngx_http_upstream.c
+@@ -185,7 +185,9 @@ static void ngx_http_upstream_ssl_init_connection(ngx_http_request_t *,
+ static void ngx_http_upstream_ssl_handshake_handler(ngx_connection_t *c);
+ static void ngx_http_upstream_ssl_handshake(ngx_http_request_t *,
+     ngx_http_upstream_t *u, ngx_connection_t *c);
+-static ngx_int_t ngx_http_upstream_ssl_name(ngx_http_request_t *r,
++static ngx_int_t ngx_http_upstream_set_ssl_name(ngx_http_request_t *r,
++    ngx_http_upstream_t *u);
++static ngx_int_t ngx_http_upstream_ssl_name_conn(ngx_http_request_t *r,
+     ngx_http_upstream_t *u, ngx_connection_t *c);
+ #endif
+ 
+@@ -776,6 +778,12 @@ found:
+ 
+ #if (NGX_HTTP_SSL)
+     u->ssl_name = uscf->host;
++
++    if (u->ssl && ngx_http_upstream_set_ssl_name(r, u) != NGX_OK) {
++        ngx_http_upstream_finalize_request(r, u,
++                                           NGX_HTTP_INTERNAL_SERVER_ERROR);
++        return;
++    }
+ #endif
+ 
+     if (uscf->peer.init(r, uscf) != NGX_OK) {
+@@ -1649,7 +1657,7 @@ ngx_http_upstream_ssl_init_connection(ngx_http_request_t *r,
+     u->output.sendfile = 0;
+ 
+     if (u->conf->ssl_server_name || u->conf->ssl_verify) {
+-        if (ngx_http_upstream_ssl_name(r, u, c) != NGX_OK) {
++        if (ngx_http_upstream_ssl_name_conn(r, u, c) != NGX_OK) {
+             ngx_http_upstream_finalize_request(r, u,
+                                                NGX_HTTP_INTERNAL_SERVER_ERROR);
+             return;
+@@ -1765,12 +1773,15 @@ failed:
+ 
+ 
+ static ngx_int_t
+-ngx_http_upstream_ssl_name(ngx_http_request_t *r, ngx_http_upstream_t *u,
+-    ngx_connection_t *c)
++ngx_http_upstream_set_ssl_name(ngx_http_request_t *r, ngx_http_upstream_t *u)
+ {
+     u_char     *p, *last;
+     ngx_str_t   name;
+ 
++    if (!u->conf->ssl_server_name && !u->conf->ssl_verify) {
++        return NGX_OK;
++    }
++
+     if (u->conf->ssl_name) {
+         if (ngx_http_complex_value(r, u->conf->ssl_name, &name) != NGX_OK) {
+             return NGX_ERROR;
+@@ -1806,8 +1817,25 @@ ngx_http_upstream_ssl_name(ngx_http_request_t *r, ngx_http_upstream_t *u,
+         name.len = p - name.data;
+     }
+ 
++done:
++
++    u->ssl_name = name;
++
++    return NGX_OK;
++}
++
++
++static ngx_int_t
++ngx_http_upstream_ssl_name_conn(ngx_http_request_t *r, ngx_http_upstream_t *u,
++    ngx_connection_t *c)
++{
++    u_char     *p;
++    ngx_str_t   name;
++
++    name = u->ssl_name;
++
+     if (!u->conf->ssl_server_name) {
+-        goto done;
++        return NGX_OK;
+     }
+ 
+ #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+@@ -1815,11 +1843,11 @@ ngx_http_upstream_ssl_name(ngx_http_request_t *r, ngx_http_upstream_t *u,
+     /* as per RFC 6066, literal IPv4 and IPv6 addresses are not permitted */
+ 
+     if (name.len == 0 || *name.data == '[') {
+-        goto done;
++        return NGX_OK;
+     }
+ 
+     if (ngx_inet_addr(name.data, name.len) != INADDR_NONE) {
+-        goto done;
++        return NGX_OK;
+     }
+ 
+     /*
+@@ -1850,10 +1878,6 @@ ngx_http_upstream_ssl_name(ngx_http_request_t *r, ngx_http_upstream_t *u,
+ 
+ #endif
+ 
+-done:
+-
+-    u->ssl_name = name;
+-
+     return NGX_OK;
+ }
+ 
+-- 
+2.20.1

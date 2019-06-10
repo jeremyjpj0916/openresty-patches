@@ -68,6 +68,8 @@ patching file nginx-1.13.6/src/event/ngx_event_openssl.c
 patching file nginx-1.13.6/src/event/ngx_event_openssl.h
 patching file nginx-1.13.6/src/stream/ngx_stream_ssl_preread_module.c
 patching file nginx-1.13.6/src/stream/ngx_stream_ssl_preread_module.c
+patching file nginx-1.13.6/src/http/modules/ngx_http_upstream_keepalive_module.c
+patching file nginx-1.13.6/src/http/ngx_http_upstream.c
 patching file ngx_lua-0.10.13/src/ngx_http_lua_balancer.c
 patching file ngx_lua-0.10.13/src/ngx_http_lua_balancer.c
 patching file ngx_lua-0.10.13/src/ngx_http_lua_ssl_certby.c
@@ -206,6 +208,8 @@ And the output should contain:
 ```bash
 patching file lua-resty-core-0.1.13/lib/ngx/balancer.lua
 patching file lua-resty-core-0.1.13/lib/ngx/balancer.lua
+patching file nginx-1.13.6/src/http/modules/ngx_http_upstream_keepalive_module.c
+patching file nginx-1.13.6/src/http/ngx_http_upstream.c
 patching file ngx_lua-0.10.11/src/ngx_http_lua_balancer.c
 patching file ngx_lua-0.10.11/src/ngx_http_lua_balancer.c
 patching file ngx_lua-0.10.11/src/ngx_http_lua_ssl_certby.c
